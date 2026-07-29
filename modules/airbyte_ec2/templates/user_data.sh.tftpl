@@ -1,0 +1,88 @@
+#!/bin/bash
+# =============================================================================
+# Airbyte self-managed bootstrap — rendered by Terraform templatefile()
+#   environment : ${environment}
+#   bucket      : ${bucket_name}
+#   region      : ${aws_region}
+#   s3_endpoint : ${s3_endpoint != "" ? s3_endpoint : "(real AWS S3)"}
+#
+# Contract (per specs/ingestion/plan.md):
+#   dnf install docker -> enable/start -> compose plugin -> fetch pinned
+#   Airbyte platform docker-compose assets -> docker compose up -d ->
+#   marker file /var/lib/airbyte-ready. Failures: logged to
+#   /var/log/user-data.log, non-zero exit via set -euo pipefail.
+# =============================================================================
+set -euo pipefail
+
+LOG_FILE="/var/log/user-data.log"
+exec > >(tee -a "$${LOG_FILE}") 2>&1
+
+echo "=== [user-data] Airbyte bootstrap starting at $$(date -Is) ==="
+
+AIRBYTE_VERSION="${airbyte_version}"
+COMPOSE_VERSION="${docker_compose_version}"
+STAGING_BUCKET="${bucket_name}"
+AWS_REGION="${aws_region}"
+S3_ENDPOINT="${s3_endpoint}"
+AIRBYTE_HOME="/opt/airbyte"
+PLATFORM_BASE_URL="https://raw.githubusercontent.com/airbytehq/airbyte-platform/v$${AIRBYTE_VERSION}"
+
+# -----------------------------------------------------------------------------
+# Docker
+# -----------------------------------------------------------------------------
+echo "=== [user-data] Installing Docker ==="
+dnf update -y
+dnf install -y docker
+systemctl enable docker
+systemctl start docker
+usermod -aG docker ec2-user || true
+
+# -----------------------------------------------------------------------------
+# Docker Compose plugin (pinned)
+# -----------------------------------------------------------------------------
+echo "=== [user-data] Installing Docker Compose plugin v$${COMPOSE_VERSION} ==="
+mkdir -p /usr/local/lib/docker/cli-plugins
+curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+  "https://github.com/docker/compose/releases/download/v$${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+docker compose version
+
+# -----------------------------------------------------------------------------
+# Airbyte platform assets (pinned release)
+# -----------------------------------------------------------------------------
+echo "=== [user-data] Fetching Airbyte platform v$${AIRBYTE_VERSION} compose assets ==="
+mkdir -p "$${AIRBYTE_HOME}/temporal/dynamicconfig"
+cd "$${AIRBYTE_HOME}"
+
+curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+  "$${PLATFORM_BASE_URL}/docker-compose.yaml" -o docker-compose.yaml
+curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+  "$${PLATFORM_BASE_URL}/.env" -o .env
+# Optional assets: fatal only if the compose file references them — download best-effort.
+curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+  "$${PLATFORM_BASE_URL}/flags.yml" -o flags.yml || true
+curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+  "$${PLATFORM_BASE_URL}/temporal/dynamicconfig/development.yaml" \
+  -o temporal/dynamicconfig/development.yaml || true
+
+# -----------------------------------------------------------------------------
+# Staging context (consumed by the operator when wiring the S3 destination;
+# Airbyte itself is configured through its UI/API)
+# -----------------------------------------------------------------------------
+cat >> .env <<EOF
+
+# --- data4ai staging context (rendered by Terraform user_data) ---
+AIRBYTE_STAGING_BUCKET=$${STAGING_BUCKET}
+AIRBYTE_STAGING_REGION=$${AWS_REGION}
+AIRBYTE_STAGING_S3_ENDPOINT=$${S3_ENDPOINT}
+EOF
+
+# -----------------------------------------------------------------------------
+# Launch
+# -----------------------------------------------------------------------------
+echo "=== [user-data] Starting Airbyte (docker compose up -d) ==="
+docker compose --env-file .env up -d
+
+echo "=== [user-data] Bootstrap finished at $$(date -Is) ==="
+touch /var/lib/airbyte-ready
