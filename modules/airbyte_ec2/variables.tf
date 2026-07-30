@@ -39,6 +39,12 @@ variable "allowed_ssh_cidr" {
   type        = string
 }
 
+variable "key_name" {
+  description = "EC2 key pair name for SSH access. Leave empty for no key."
+  type        = string
+  default     = ""
+}
+
 variable "bucket_name" {
   description = "Name of the staging S3 bucket Airbyte writes to."
   type        = string
