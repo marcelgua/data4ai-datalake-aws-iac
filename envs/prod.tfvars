@@ -13,9 +13,11 @@ aws_region  = "us-east-1"
 # Airbyte needs >= 8 GB RAM.
 instance_type = "t3.large"
 
-# TODO(security): restrict to the operator/team egress IP before first apply,
-# e.g. allowed_ssh_cidr = "203.0.113.10/32".
-allowed_ssh_cidr = "0.0.0.0/0"
+# EC2 key pair for SSH access (created via: aws ec2 create-key-pair)
+key_name = "data4ai-airbyte-key"
+
+# Restrict SSH + Airbyte UI to your IP only
+allowed_ssh_cidr = "177.39.123.94/32"
 
 # Empty = look up the latest Amazon Linux 2023 AMI at apply time.
 # Pin an AMI ID here for fully reproducible prod deploys, e.g.:

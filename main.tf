@@ -47,6 +47,7 @@ module "airbyte_ec2" {
   bucket_name            = module.s3_bucket.bucket_name
   bucket_arn             = module.s3_bucket.bucket_arn
   s3_endpoint            = local.is_local ? "http://localhost:4566" : ""
+  key_name               = var.key_name
   airbyte_version        = var.airbyte_version
   docker_compose_version = var.docker_compose_version
   tags                   = local.common_tags

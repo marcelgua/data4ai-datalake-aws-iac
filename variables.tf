@@ -49,6 +49,12 @@ variable "allowed_ssh_cidr" {
   }
 }
 
+variable "key_name" {
+  description = "EC2 key pair name for SSH access to the Airbyte instance. Leave empty for no key."
+  type        = string
+  default     = ""
+}
+
 variable "ami_id" {
   description = <<-EOT
     Explicit AMI ID for the Airbyte EC2 instance. When empty, the latest

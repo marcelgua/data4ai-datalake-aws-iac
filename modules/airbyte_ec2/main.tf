@@ -55,7 +55,7 @@ resource "aws_security_group" "airbyte" {
     from_port   = 8000
     to_port     = 8000
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.allowed_ssh_cidr]
   }
 
   ingress {
@@ -128,6 +128,11 @@ resource "aws_iam_role_policy" "airbyte_s3_access" {
   policy = data.aws_iam_policy_document.airbyte_s3_access.json
 }
 
+resource "aws_iam_role_policy_attachment" "airbyte_ssm" {
+  role       = aws_iam_role.airbyte.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 resource "aws_iam_instance_profile" "airbyte" {
   name = "${var.name_prefix}-profile"
   role = aws_iam_role.airbyte.name
@@ -141,6 +146,7 @@ resource "aws_iam_instance_profile" "airbyte" {
 resource "aws_instance" "airbyte" {
   ami                    = local.resolved_ami_id
   instance_type          = var.instance_type
+  key_name               = var.key_name
   iam_instance_profile   = aws_iam_instance_profile.airbyte.name
   vpc_security_group_ids = [aws_security_group.airbyte.id]
 
