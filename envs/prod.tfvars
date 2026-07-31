@@ -13,11 +13,9 @@ aws_region  = "us-east-1"
 # Airbyte needs >= 8 GB RAM.
 instance_type = "t3.large"
 
-# EC2 key pair for SSH access (created via: aws ec2 create-key-pair)
+# EC2 key pair (break-glass only — no security group rule exposes port 22;
+# day-to-day shell/UI access goes through SSM Session Manager).
 key_name = "data4ai-airbyte-key"
-
-# Restrict SSH + Airbyte UI to your IP only
-allowed_ssh_cidr = "177.39.123.94/32"
 
 # Empty = look up the latest Amazon Linux 2023 AMI at apply time.
 # Pin an AMI ID here for fully reproducible prod deploys, e.g.:

@@ -9,6 +9,8 @@ Terraform IaC for a data lake ingestion tier: versioned/encrypted S3 bucket + se
 ./scripts/test-local.sh      # 25 integration assertions against LocalStack
 ./scripts/local-down.sh      # terraform destroy (local) + docker compose down -v
 ./scripts/verify-airbyte-s3.sh <url> <s3-endpoint> <bucket>  # Airbyte->S3 smoke test
+./scripts/verify-ssm-access.sh <profile> # Prod SSM and Basic Auth verification
+./scripts/ssm-connect.sh <ui|shell>      # Connect to Airbyte via SSM
 
 # Static checks
 terraform fmt -check -recursive
@@ -41,10 +43,12 @@ No `make`, no `package.json`, no CI pipelines are configured. Prefer the scripts
 - **`s3_use_path_style = true` is required for LocalStack S3** and must never be set in prod.
 - **`$${VAR}` escaping** in `modules/airbyte_ec2/templates/user_data.sh.tftpl` — bash variables inside `templatefile()` need the double-dollar to pass through Terraform interpolation.
 - **EC2 `user_data` is async** — `terraform apply` succeeds regardless of bootstrap outcome. The test script polls for `/var/lib/airbyte-ready` marker.
-- **Same CIDR for SSH (22) and Airbyte UI (8000)** — `var.allowed_ssh_cidr` controls ingress for both.
+- **Zero Ingress** — The security group has no ingress rules. SSH and UI access are handled entirely through SSM Session Manager.
 - **Airbyte config lives on the EC2 Docker volumes**, not in Terraform state. Tearing down the EC2 instance discards Airbyte configuration.
 - **Airbyte `user_data` downloads from GitHub raw** — the EC2 needs outbound internet access (SG allows all egress).
 
 ## Specs
 
 Requirements and architecture plan live in `specs/ingestion/` (spec.md + plan.md). 7 requirements (R1–R7) with traceable test coverage.
+
+There is also a second capability, Airbyte UI Access, located in `specs/airbyte-ui-access/` covering zero-ingress SSM access and Basic Auth hardening (R1-R8).

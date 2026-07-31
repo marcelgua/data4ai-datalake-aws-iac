@@ -18,6 +18,8 @@ modules/airbyte_ec2/          EC2 + SG + IAM instance profile + user_data
 scripts/local-up.sh           Start LocalStack, terraform init + apply (local)
 scripts/test-local.sh         Integration tests vs LocalStack (read-only)
 scripts/verify-airbyte-s3.sh  Airbyte -> S3 connection/partition/AVRO checks
+scripts/verify-ssm-access.sh  Verify SSM connection policy and basic auth
+scripts/ssm-connect.sh        Interactive script to connect to UI via SSM
 scripts/local-down.sh         terraform destroy (local) + compose down -v
 ```
 
@@ -40,6 +42,21 @@ The staging bucket is `data4ai-staging-local` (pattern
 `<project>-staging-<environment>`), versioned, SSE-S3 (AES256), public access
 fully blocked. The mocked EC2 host carries an instance profile scoped to
 `s3:ListBucket` on the bucket and `s3:Get/Put/DeleteObject` on `bucket/*`.
+
+## Accessing the Airbyte UI (Production)
+
+The Airbyte EC2 instance exposes **zero public ingress ports**. All access is routed through AWS Systems Manager (SSM) Session Manager.
+
+1. Ensure you have the [AWS CLI](https://aws.amazon.com/cli/) and [Session Manager Plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) installed.
+2. Ensure you have AWS credentials with permissions granted by `data4ai-<env>-ssm-access`.
+3. Use the connection script to forward the UI port (8000) or open a shell:
+
+```bash
+./scripts/ssm-connect.sh ui      # Forwards port 8000 to localhost:8000
+./scripts/ssm-connect.sh shell   # Opens a bash shell on the instance
+```
+
+Airbyte UI basic auth is enforced. You must set `TF_VAR_airbyte_basic_auth_username` and `TF_VAR_airbyte_basic_auth_password` in your environment before running `terraform apply`.
 
 ## Production
 

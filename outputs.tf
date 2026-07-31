@@ -32,12 +32,12 @@ output "airbyte_instance_id" {
   value       = module.airbyte_ec2.instance_id
 }
 
-output "airbyte_public_ip" {
-  description = "Public IP of the Airbyte host."
-  value       = module.airbyte_ec2.public_ip
-}
-
-output "airbyte_url" {
-  description = "URL of the Airbyte UI/API."
-  value       = "http://${module.airbyte_ec2.public_ip}:8000"
+output "ssm_access_policy_arn" {
+  description = <<-EOT
+    ARN of the human-facing SSM Session Manager access policy (shell + Airbyte
+    UI port-forward). Attach it to the IAM users/groups that need Airbyte
+    access (manual step — see README). In the local environment this renders
+    a LocalStack mock ARN (placeholder; SSM is not emulated).
+  EOT
+  value       = aws_iam_policy.ssm_access.arn
 }
