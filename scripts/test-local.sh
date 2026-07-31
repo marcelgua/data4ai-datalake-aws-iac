@@ -2,7 +2,9 @@
 # =============================================================================
 # test-local.sh — Integration tests: Terraform resources vs LocalStack emulation
 # =============================================================================
-# Covers: AC-R1a, AC-R1b, AC-R2-local, AC-R3-local, AC-R5
+# Covers: AC-R1a, AC-R1b, AC-R2-local, AC-R3-local, AC-R5 (ingestion)
+#          + AC-AUA-R1a, AC-AUA-R1b, AC-AUA-R7a, AC-AUA-OUTa, AC-AUA-R4a,
+#            AC-AUA-R5a, AC-AUA-R5b, AC-AUA-R5c, AC-AUA-R5d (airbyte-ui-access)
 # Plus boundary and edge-case tests per Spec Kit methodology.
 #
 # Pre-conditions:
@@ -28,6 +30,16 @@ BUCKET_PROD="${PROJECT}-staging-${ENV_PROD}"
 HEALTH_URL="${LOCALSTACK_URL}/_localstack/health"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# ---------------------------------------------------------------------------
+# Dummy TF_VAR exports (airbyte-ui-access spec — R5, R6)
+# Required variables must be set even for plan-only operations in this script.
+# These are throwaway LocalStack-only values; the EC2 instance never boots in
+# LocalStack, so user_data is never executed. The dummy lives only in gitignored
+# local state.
+# ---------------------------------------------------------------------------
+export TF_VAR_airbyte_basic_auth_username="${TF_VAR_airbyte_basic_auth_username:-local-dev}"
+export TF_VAR_airbyte_basic_auth_password="${TF_VAR_airbyte_basic_auth_password:-local-dummy-pw-sentinel-keep-local}"
 
 # ---------------------------------------------------------------------------
 # Colour helpers
@@ -437,6 +449,505 @@ else
         fail "Prod plan contains localhost endpoint override — provider misconfiguration"
     else
         pass "Prod plan has NO localhost endpoint override (correct)"
+    fi
+fi
+
+fail_if_any
+
+# =============================================================================
+# airbyte-ui-access spec (specs/airbyte-ui-access)
+# R1, R4, R5, R6, R7 structural assertions against LocalStack
+#
+# RED PHASE: ALL of these assertions MUST fail before the spec is implemented.
+# Expected failures:
+#   - R1a: SG has 2 ingress blocks today (port 8000 + port 22)
+#   - R1b: egress exists and is correct (may pass if unchanged)
+#   - R7a: allowed_ssh_cidr still in plan + tfvars
+#   - OUTa: airbyte_url/airbyte_public_ip exist; ssm_access_policy_arn absent
+#   - R4a: no IAM policy resource yet
+#   - R5a: user_data has no BASIC_AUTH_* lines
+#   - R5b/R5c: airbyte_basic_auth_password variable undeclared → plan error
+#   - R5d: airbyte_basic_auth_username variable undeclared → plan error
+# Green phase: after Stage 4 implementation, these assertions must pass.
+# =============================================================================
+header "airbyte-ui-access: R1 Zero Public Ingress (SG structural)"
+
+# -----------------------------------------------------------------------------
+# AC-AUA-R1a — Security group has zero ingress rules
+#   Sub-test 1: terraform state show → no "ingress {" block
+#   Sub-test 2: LocalStack EC2 API → IpPermissions == []
+# -----------------------------------------------------------------------------
+echo "  → AC-AUA-R1a: checking SG has zero ingress via terraform state …"
+SG_STATE="$(terraform state show module.airbyte_ec2.aws_security_group.airbyte 2>&1 || true)"
+if echo "${SG_STATE}" | grep -q 'ingress {'; then
+    fail "AC-AUA-R1a: security group has ingress block(s) in terraform state (expected zero)" \
+         "SG must have no ingress { } blocks — remove the port 8000 and port 22 ingress rules from the module"
+else
+    pass "AC-AUA-R1a: security group has zero ingress blocks in terraform state"
+fi
+
+echo ""
+echo "  → AC-AUA-R1a: checking SG IpPermissions via LocalStack EC2 API …"
+# Find the Airbyte security group by name pattern
+SG_ID="$(aws_ls ec2 describe-security-groups \
+    --filters "Name=group-name,Values=*airbyte*" \
+    --query "SecurityGroups[0].GroupId" --output text 2>&1 || true)"
+
+if [[ -z "${SG_ID}" ]] || [[ "${SG_ID}" == "None" ]] || [[ "${SG_ID}" == "None"* ]]; then
+    fail "AC-AUA-R1a: could not find Airbyte security group via LocalStack EC2 API" \
+         "Ensure terraform apply was run — module.airbyte_ec2 should create aws_security_group.airbyte"
+else
+    SG_JSON="$(aws_ls ec2 describe-security-groups --group-ids "${SG_ID}" --output json 2>&1 || true)"
+    IP_PERM_COUNT="$(echo "${SG_JSON}" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    groups = data.get('SecurityGroups', [])
+    if groups:
+        perms = groups[0].get('IpPermissions', [])
+        print(len(perms))
+    else:
+        print('no_groups')
+except Exception as e:
+    print('parse_error')
+" 2>/dev/null || echo 'parse_error')"
+
+    case "${IP_PERM_COUNT}" in
+        0)
+            pass "AC-AUA-R1a: SG IpPermissions is empty (zero ingress rules)"
+            ;;
+        parse_error|no_groups)
+            fail "AC-AUA-R1a: could not parse SG ingress from LocalStack API" \
+                 "Raw SG JSON: $(echo "${SG_JSON}" | head -c 200)"
+            ;;
+        *)
+            fail "AC-AUA-R1a: SG has ${IP_PERM_COUNT} ingress rule(s) (expected 0)" \
+                 "SG ID: ${SG_ID} — all ingress rules must be removed"
+            ;;
+    esac
+fi
+
+# -----------------------------------------------------------------------------
+# AC-AUA-R1b — Exactly one egress rule: all protocols, 0.0.0.0/0
+# -----------------------------------------------------------------------------
+echo ""
+echo "  → AC-AUA-R1b: checking exactly one egress rule (all protocols, 0.0.0.0/0) …"
+
+if [[ -n "${SG_ID:-}" ]] && [[ "${SG_ID}" != "None" ]]; then
+    SG_JSON="$(aws_ls ec2 describe-security-groups --group-ids "${SG_ID}" --output json 2>&1 || true)"
+    EGRESS_CHECK="$(echo "${SG_JSON}" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    groups = data.get('SecurityGroups', [])
+    if not groups:
+        print('no_groups')
+        sys.exit(0)
+    egress = groups[0].get('IpPermissionsEgress', [])
+    
+    errors = []
+    # Check exactly one egress rule
+    if len(egress) != 1:
+        errors.append('expected 1 egress rule, got {}'.format(len(egress)))
+        print('FAIL:' + '; '.join(errors))
+        sys.exit(0)
+    
+    rule = egress[0]
+    # Check protocol == -1 (all)
+    if str(rule.get('IpProtocol', '')) != '-1':
+        errors.append('protocol is {} (expected -1 for all)'.format(rule.get('IpProtocol')))
+    
+    # Check 0.0.0.0/0
+    ranges = rule.get('IpRanges', [])
+    if len(ranges) != 1 or ranges[0].get('CidrIp', '') != '0.0.0.0/0':
+        errors.append('IpRanges should be exactly [0.0.0.0/0], got {}'.format(ranges))
+    
+    if errors:
+        print('FAIL:' + '; '.join(errors))
+    else:
+        print('PASS')
+except Exception as e:
+    print('parse_error:' + str(e))
+" 2>/dev/null || echo 'parse_error')"
+
+    case "${EGRESS_CHECK}" in
+        PASS)
+            pass "AC-AUA-R1b: exactly one egress rule (all protocols, 0.0.0.0/0)"
+            ;;
+        FAIL:*)
+            fail "AC-AUA-R1b: ${EGRESS_CHECK#FAIL:}" \
+                 "Egress must be: exactly one rule, protocol -1, cidr 0.0.0.0/0"
+            ;;
+        *)
+            fail "AC-AUA-R1b: could not verify egress rule — ${EGRESS_CHECK}"
+            ;;
+    esac
+else
+    fail "AC-AUA-R1b: skipped — no SG ID from R1a check"
+fi
+
+fail_if_any
+
+# =============================================================================
+# AC-AUA-R7a — allowed_ssh_cidr absent from plan and tfvars
+# =============================================================================
+header "airbyte-ui-access: R7 Removal of allowed_ssh_cidr"
+
+echo "  → AC-AUA-R7a: checking terraform plan output for allowed_ssh_cidr …"
+cd "${PROJECT_ROOT}"
+
+if PLAN_OUT_R7="$(terraform plan -var-file="envs/local.tfvars" 2>&1)"; then
+    PLAN_R7_RC=0
+else
+    PLAN_R7_RC=$?
+fi
+
+if [[ ${PLAN_R7_RC} -eq 0 ]] || [[ ${PLAN_R7_RC} -eq 2 ]]; then
+    if echo "${PLAN_OUT_R7}" | grep -q 'allowed_ssh_cidr'; then
+        fail "AC-AUA-R7a: terraform plan output references allowed_ssh_cidr (must be absent)" \
+             "Remove allowed_ssh_cidr variable from root and module; remove the line from both tfvars"
+    else
+        pass "AC-AUA-R7a: terraform plan output has NO allowed_ssh_cidr reference"
+    fi
+else
+    fail "AC-AUA-R7a: terraform plan (local) failed with exit code ${PLAN_R7_RC}" \
+         "${PLAN_OUT_R7}"
+fi
+
+echo ""
+echo "  → AC-AUA-R7a: checking envs/local.tfvars for allowed_ssh_cidr …"
+if grep -q 'allowed_ssh_cidr' "${PROJECT_ROOT}/envs/local.tfvars" 2>/dev/null; then
+    fail "AC-AUA-R7a: envs/local.tfvars still contains allowed_ssh_cidr line (must be removed)"
+else
+    pass "AC-AUA-R7a: envs/local.tfvars has no allowed_ssh_cidr"
+fi
+
+echo ""
+echo "  → AC-AUA-R7a: checking envs/prod.tfvars for allowed_ssh_cidr …"
+if grep -q 'allowed_ssh_cidr' "${PROJECT_ROOT}/envs/prod.tfvars" 2>/dev/null; then
+    fail "AC-AUA-R7a: envs/prod.tfvars still contains allowed_ssh_cidr line (must be removed)"
+else
+    pass "AC-AUA-R7a: envs/prod.tfvars has no allowed_ssh_cidr"
+fi
+
+fail_if_any
+
+# =============================================================================
+# AC-AUA-OUTa — outputs: airbyte_url/airbyte_public_ip absent; ssm_access_policy_arn present
+# =============================================================================
+header "airbyte-ui-access: Output checks (R4/R7)"
+
+echo "  → AC-AUA-OUTa: airbyte_url output must be absent …"
+cd "${PROJECT_ROOT}"
+if terraform output airbyte_url >/dev/null 2>&1; then
+    fail "AC-AUA-OUTa: terraform output airbyte_url exists (must be removed — implies public access)"
+else
+    pass "AC-AUA-OUTa: terraform output airbyte_url is absent (expected)"
+fi
+
+echo ""
+echo "  → AC-AUA-OUTa: airbyte_public_ip output must be absent …"
+if terraform output airbyte_public_ip >/dev/null 2>&1; then
+    fail "AC-AUA-OUTa: terraform output airbyte_public_ip exists (must be removed)"
+else
+    pass "AC-AUA-OUTa: terraform output airbyte_public_ip is absent (expected)"
+fi
+
+echo ""
+echo "  → AC-AUA-OUTa: ssm_access_policy_arn output must exist and contain :policy/ …"
+if SSM_POLICY_ARN="$(terraform output -raw ssm_access_policy_arn 2>&1)"; then
+    if echo "${SSM_POLICY_ARN}" | grep -q ':policy/'; then
+        pass "AC-AUA-OUTa: ssm_access_policy_arn = ${SSM_POLICY_ARN} (contains :policy/)"
+    else
+        fail "AC-AUA-OUTa: ssm_access_policy_arn '${SSM_POLICY_ARN}' does not contain ':policy/'" \
+             "Expected ARN format: arn:aws:iam::*:policy/<name>"
+    fi
+else
+    fail "AC-AUA-OUTa: terraform output -raw ssm_access_policy_arn failed — output absent" \
+         "Add output \"ssm_access_policy_arn\" to outputs.tf referencing aws_iam_policy.ssm_access.arn"
+fi
+
+fail_if_any
+
+# =============================================================================
+# AC-AUA-R4a — IAM least-privilege policy structural checks
+# =============================================================================
+header "airbyte-ui-access: R4 IAM Policy structural assertions"
+
+echo "  → AC-AUA-R4a: locating SSM access policy in LocalStack IAM …"
+POLICY_ARN="$(aws_ls iam list-policies --scope Local \
+    --query "Policies[?PolicyName=='data4ai-local-ssm-access'].Arn" \
+    --output text 2>&1 || true)"
+
+if [[ -z "${POLICY_ARN}" ]] || [[ "${POLICY_ARN}" == "None" ]] || [[ "${POLICY_ARN}" == *"NoSuch"* ]]; then
+    fail "AC-AUA-R4a: SSM access policy 'data4ai-local-ssm-access' not found in LocalStack IAM" \
+         "Ensure aws_iam_policy.ssm_access is created with name 'data4ai-local-ssm-access'"
+else
+    echo "    Policy ARN: ${POLICY_ARN}"
+
+    echo ""
+    echo "  → AC-AUA-R4a: fetching policy document …"
+    POLICY_VER="$(aws_ls iam get-policy --policy-arn "${POLICY_ARN}" \
+        --query "Policy.DefaultVersionId" --output text 2>&1 || true)"
+
+    if [[ -z "${POLICY_VER}" ]] || [[ "${POLICY_VER}" == "None" ]]; then
+        fail "AC-AUA-R4a: could not get default version for policy ${POLICY_ARN}"
+    else
+        POLICY_DOC="$(aws_ls iam get-policy-version \
+            --policy-arn "${POLICY_ARN}" \
+            --version-id "${POLICY_VER}" \
+            --output json 2>&1 || true)"
+
+        echo "    Parsing policy document with python3 …"
+        R4A_RESULT="$(echo "${POLICY_DOC}" | python3 -c "
+import sys, json
+
+try:
+    data = json.load(sys.stdin)
+    # The Document field may be a JSON string (URL-decoded) or a dict
+    doc = data.get('PolicyVersion', {}).get('Document', {})
+    if isinstance(doc, str):
+        doc = json.loads(doc)
+    
+    statements = doc.get('Statement', [])
+    if not isinstance(statements, list):
+        print('FAIL:Statement is not a list')
+        sys.exit(0)
+    
+    errors = []
+    
+    # --- Find StartSession statement ---
+    start_stmt = None
+    for stmt in statements:
+        actions = stmt.get('Action', [])
+        if isinstance(actions, str):
+            actions = [actions]
+        if 'ssm:StartSession' in actions:
+            start_stmt = stmt
+            break
+    
+    if start_stmt is None:
+        errors.append('StartSession: statement not found')
+    else:
+        resources = start_stmt.get('Resource', [])
+        if isinstance(resources, str):
+            resources = [resources]
+        
+        # Check exactly 3 resources
+        if len(resources) != 3:
+            errors.append('StartSession: expected 3 resources, got {}: {}'.format(len(resources), resources))
+        else:
+            # Order-INDEPENDENT matching: aws_iam_policy_document renders Resource
+            # as an unordered set (hash-sorted) — positional checks are impossible.
+            inst = [r for r in resources if ':instance/i-' in str(r)]
+            shell_doc = [r for r in resources if 'SSM-SessionManagerRunShell' in str(r)]
+            fwd_doc = [r for r in resources if 'AWS-StartPortForwardingSession' in str(r)]
+            if len(inst) != 1:
+                errors.append('StartSession: expected exactly 1 instance ARN (:instance/i-), got {}'.format(inst))
+            if len(shell_doc) != 1:
+                errors.append('StartSession: expected exactly 1 SSM-SessionManagerRunShell ARN, got {}'.format(shell_doc))
+            elif '::document/' in str(shell_doc[0]):
+                errors.append('StartSession: SSM-SessionManagerRunShell ARN should have account segment (not ::document/): {}'.format(shell_doc[0]))
+            if len(fwd_doc) != 1:
+                errors.append('StartSession: expected exactly 1 AWS-StartPortForwardingSession ARN, got {}'.format(fwd_doc))
+            elif '::document/' not in str(fwd_doc[0]):
+                errors.append('StartSession: AWS-StartPortForwardingSession ARN should have empty account segment (::document/): {}'.format(fwd_doc[0]))
+        
+        # Check: no '*' resource in StartSession
+        if '*' in [str(r) for r in resources]:
+            errors.append('StartSession: contains \"*\" resource — must be scoped')
+        # Check: no ':instance/*'
+        if any(':instance/*' in str(r) for r in resources):
+            errors.append('StartSession: contains :instance/* — must use specific instance ID')
+    
+    # --- Find TerminateSession/ResumeSession statement ---
+    term_stmt = None
+    for stmt in statements:
+        actions = stmt.get('Action', [])
+        if isinstance(actions, str):
+            actions = [actions]
+        if 'ssm:TerminateSession' in actions or 'ssm:ResumeSession' in actions:
+            term_stmt = stmt
+            break
+    
+    if term_stmt is None:
+        errors.append('TerminateSession/ResumeSession: statement not found')
+    else:
+        resources = term_stmt.get('Resource', [])
+        if isinstance(resources, str):
+            resources = [resources]
+        found_session_scope = False
+        for r in resources:
+            if 'session/' in str(r) and 'aws:username' in str(r):
+                found_session_scope = True
+                break
+        if not found_session_scope:
+            errors.append('TerminateSession: resources must scope to \${aws:username} session ARN, got {}'.format(resources))
+    
+    # --- Find OpenDataChannel statement ---
+    odc_stmt = None
+    for stmt in statements:
+        actions = stmt.get('Action', [])
+        if isinstance(actions, str):
+            actions = [actions]
+        if 'ssmmessages:OpenDataChannel' in actions:
+            odc_stmt = stmt
+            break
+    
+    if odc_stmt is None:
+        errors.append('OpenDataChannel: ssmmessages:OpenDataChannel statement not found')
+    else:
+        resources = odc_stmt.get('Resource', [])
+        if isinstance(resources, str):
+            resources = [resources]
+        found_odc_scope = False
+        for r in resources:
+            if 'session/' in str(r) and 'aws:username' in str(r):
+                found_odc_scope = True
+                break
+        if not found_odc_scope:
+            errors.append('OpenDataChannel: resources must scope to \${aws:username} session ARN, got {}'.format(resources))
+    
+    # --- Find DescribeInstances statement ---
+    desc_stmt = None
+    for stmt in statements:
+        actions = stmt.get('Action', [])
+        if isinstance(actions, str):
+            actions = [actions]
+        if 'ec2:DescribeInstances' in actions:
+            desc_stmt = stmt
+            break
+    
+    if desc_stmt is None:
+        errors.append('DescribeInstances: ec2:DescribeInstances statement not found')
+    else:
+        resources = desc_stmt.get('Resource', [])
+        if isinstance(resources, str):
+            resources = [resources]
+        if '*' not in [str(r) for r in resources]:
+            errors.append('DescribeInstances: expected Resource \"*\" (for instance discovery), got {}'.format(resources))
+    
+    if errors:
+        print('FAIL:' + ' | '.join(errors))
+    else:
+        print('PASS:all {} assertions verified'.format(7))
+except Exception as e:
+    import traceback
+    print('parse_error:' + str(e) + ' -- ' + traceback.format_exc().replace(chr(10),' // '))
+" 2>/dev/null || echo 'parse_error')"
+
+        case "${R4A_RESULT}" in
+            PASS:*)
+                pass "AC-AUA-R4a: IAM policy structure verified — ${R4A_RESULT#PASS:}"
+                ;;
+            FAIL:*)
+                fail "AC-AUA-R4a: IAM policy assertion(s) failed" \
+                     "${R4A_RESULT#FAIL:}"
+                ;;
+            *)
+                fail "AC-AUA-R4a: could not parse IAM policy — ${R4A_RESULT}" \
+                     "Raw policy doc (truncated): $(echo "${POLICY_DOC}" | head -c 300)"
+                ;;
+        esac
+    fi
+fi
+
+fail_if_any
+
+# =============================================================================
+# AC-AUA-R5a — user_data contains BASIC_AUTH_USERNAME= and BASIC_AUTH_PASSWORD=
+# =============================================================================
+header "airbyte-ui-access: R5 Basic Auth hardening"
+
+echo "  → AC-AUA-R5a: checking user_data contains BASIC_AUTH_USERNAME= and BASIC_AUTH_PASSWORD= …"
+cd "${PROJECT_ROOT}"
+
+# Fetch user_data from LocalStack directly, as Terraform state stores a SHA1 hash for sensitive user_data
+INSTANCE_ID="$(terraform output -raw airbyte_instance_id 2>/dev/null || echo '')"
+if [[ -n "${INSTANCE_ID}" ]]; then
+    USER_DATA_B64="$(aws ec2 describe-instance-attribute --instance-id "${INSTANCE_ID}" --attribute userData --endpoint-url=http://localhost:4566 --no-sign-request --output text --query 'UserData.Value' 2>/dev/null || echo '')"
+    USER_DATA_DECODED="$(echo "${USER_DATA_B64}" | base64 -d 2>/dev/null || echo '')"
+else
+    USER_DATA_DECODED=""
+fi
+
+if echo "${USER_DATA_DECODED}" | grep -q 'BASIC_AUTH_USERNAME='; then
+    pass "AC-AUA-R5a: user_data contains BASIC_AUTH_USERNAME="
+else
+    fail "AC-AUA-R5a: user_data does NOT contain BASIC_AUTH_USERNAME=" \
+         "user_data.sh.tftpl must append BASIC_AUTH_USERNAME=\${basic_auth_username} to .env"
+fi
+
+if echo "${USER_DATA_DECODED}" | grep -q 'BASIC_AUTH_PASSWORD='; then
+    pass "AC-AUA-R5a: user_data contains BASIC_AUTH_PASSWORD="
+else
+    fail "AC-AUA-R5a: user_data does NOT contain BASIC_AUTH_PASSWORD=" \
+         "user_data.sh.tftpl must append BASIC_AUTH_PASSWORD=\${basic_auth_password} to .env"
+fi
+
+fail_if_any
+
+# =============================================================================
+# AC-AUA-R5b — Sensitive password is redacted in plan output
+# AC-AUA-R5c — Password change reports "must be replaced"
+# (Same terraform plan invocation serves both assertions)
+# =============================================================================
+echo ""
+echo "  → AC-AUA-R5b,R5c: running terraform plan with sentinel password …"
+cd "${PROJECT_ROOT}"
+
+REDACTION_SENTINEL="REDACTION_SENTINEL_x"
+if PLAN_AUTH_OUT="$(terraform plan -var-file="envs/local.tfvars" \
+    -var "airbyte_basic_auth_password=${REDACTION_SENTINEL}" 2>&1)"; then
+    PLAN_AUTH_RC=0
+else
+    PLAN_AUTH_RC=$?
+fi
+
+if [[ ${PLAN_AUTH_RC} -ne 0 ]] && [[ ${PLAN_AUTH_RC} -ne 2 ]]; then
+    fail "AC-AUA-R5b: terraform plan with password var failed (exit ${PLAN_AUTH_RC})" \
+         "In red phase this is expected (variable not yet declared). Output: $(echo "${PLAN_AUTH_OUT}" | tail -5)"
+    fail "AC-AUA-R5c: terraform plan with password var failed (exit ${PLAN_AUTH_RC})" \
+         "In red phase this is expected — shared with R5b plan invocation."
+else
+    # --- AC-AUA-R5b: redaction ---
+    if echo "${PLAN_AUTH_OUT}" | grep -q "${REDACTION_SENTINEL}"; then
+        fail "AC-AUA-R5b: plan output CONTAINS the sentinel password (must be redacted)" \
+             "Ensure var.airbyte_basic_auth_password has sensitive = true, which propagates through templatefile()"
+    else
+        pass "AC-AUA-R5b: plan output does NOT contain sentinel password (sensitive redacted)"
+    fi
+
+    # --- AC-AUA-R5c: replacement ---
+    if echo "${PLAN_AUTH_OUT}" | grep -qE '(must be replaced|forces replacement|# aws_instance\.airbyte must be replaced)'; then
+        pass "AC-AUA-R5c: plan reports aws_instance.airbyte must be replaced (user_data change)"
+    else
+        fail "AC-AUA-R5c: plan does NOT report instance replacement for password change" \
+             "user_data changes must force EC2 instance destroy+recreate — check plan output"
+    fi
+fi
+
+fail_if_any
+
+# =============================================================================
+# AC-AUA-R5d — Negative validation: empty username must fail plan
+# =============================================================================
+echo ""
+echo "  → AC-AUA-R5d: negative validation — empty username must fail …"
+cd "${PROJECT_ROOT}"
+
+# Expected-failure idiom: plan with empty username should fail WITH validation error
+if PLAN_VAL_OUT="$(terraform plan -var-file="envs/local.tfvars" \
+    -var 'airbyte_basic_auth_username=' 2>&1)"; then
+    fail "AC-AUA-R5d: terraform plan with empty username unexpectedly SUCCEEDED" \
+         "var.airbyte_basic_auth_username must have non-empty validation and no default"
+else
+    # Check for the expected validation error message
+    if echo "${PLAN_VAL_OUT}" | grep -qiE '(airbyte_basic_auth_username.*required|must be non-empty|length.*0|Invalid value for variable)'; then
+        pass "AC-AUA-R5d: empty username correctly rejected with validation error"
+    else
+        fail "AC-AUA-R5d: plan with empty username failed, but NOT with expected validation message" \
+             "Expected error about airbyte_basic_auth_username being required/non-empty. Got: $(echo "${PLAN_VAL_OUT}" | tail -3)"
     fi
 fi
 

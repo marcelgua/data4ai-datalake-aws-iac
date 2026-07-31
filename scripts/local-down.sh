@@ -25,6 +25,12 @@ fail() { echo "[local-down] ERROR: $*" >&2; exit 1; }
 grep -Eq '^\s*environment\s*=\s*"local"' "${TFVARS}" \
   || fail "safety check: ${TFVARS} does not set environment = \"local\" — refusing to destroy"
 
+# Dummy basic-auth credentials for the required airbyte-ui-access variables
+# (inert LocalStack-only values: destroy evaluates required variables too;
+# the dummy lives only in gitignored local state).
+export TF_VAR_airbyte_basic_auth_username="${TF_VAR_airbyte_basic_auth_username:-local-dev}"
+export TF_VAR_airbyte_basic_auth_password="${TF_VAR_airbyte_basic_auth_password:-local-dummy-pw-sentinel-keep-local}"
+
 # ---------------------------------------------------------------------------
 # 1. Terraform destroy (local)
 # ---------------------------------------------------------------------------

@@ -44,27 +44,14 @@ data "aws_ami" "amazon_linux_2023" {
 }
 
 # -----------------------------------------------------------------------------
-# Security group: Airbyte UI (8000) + SSH (22, restricted) / open egress
+# Security group: ZERO inbound rules (SSM Session Manager only) / open egress.
+# UI and shell access go through SSM port-forwarding — no SG rule exposes any
+# port (airbyte-ui-access R1). Zero inline inbound blocks also keeps a future
+# ALB-sourced aws_vpc_security_group_ingress_rule at root safe (R8).
 # -----------------------------------------------------------------------------
 resource "aws_security_group" "airbyte" {
   name        = "${var.name_prefix}-sg"
-  description = "Airbyte host: UI/API (8000) and SSH (22 from allowed CIDR)"
-
-  ingress {
-    description = "Airbyte UI / API"
-    from_port   = 8000
-    to_port     = 8000
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
-  }
-
-  ingress {
-    description = "SSH from allowed CIDR"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
-  }
+  description = "Airbyte host: no public inbound -- SSM Session Manager only"
 
   egress {
     description = "Allow all outbound (package repos, Docker Hub, S3, sources)"
@@ -150,6 +137,11 @@ resource "aws_instance" "airbyte" {
   iam_instance_profile   = aws_iam_instance_profile.airbyte.name
   vpc_security_group_ids = [aws_security_group.airbyte.id]
 
+  # user_data changes (e.g. basic-auth credential rotation) MUST destroy and
+  # recreate the instance (airbyte-ui-access R5). Provider default (false)
+  # would update user_data in place via stop/start.
+  user_data_replace_on_change = true
+
   user_data = templatefile("${path.module}/templates/user_data.sh.tftpl", {
     bucket_name            = var.bucket_name
     aws_region             = var.aws_region
@@ -157,6 +149,8 @@ resource "aws_instance" "airbyte" {
     s3_endpoint            = var.s3_endpoint
     airbyte_version        = var.airbyte_version
     docker_compose_version = var.docker_compose_version
+    basic_auth_username    = var.airbyte_basic_auth_username
+    basic_auth_password    = var.airbyte_basic_auth_password
   })
 
   root_block_device {

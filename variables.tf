@@ -38,15 +38,21 @@ variable "instance_type" {
   default     = "t3.large"
 }
 
-variable "allowed_ssh_cidr" {
-  description = "CIDR block allowed to reach the Airbyte EC2 instance over SSH (port 22)."
+variable "airbyte_basic_auth_username" {
+  description = "REQUIRED. Basic auth username for the Airbyte UI proxy. Supply via TF_VAR_airbyte_basic_auth_username or -var; never commit to tfvars."
   type        = string
-  default     = "0.0.0.0/0"
 
   validation {
-    condition     = can(cidrhost(var.allowed_ssh_cidr, 0))
-    error_message = "allowed_ssh_cidr must be a valid IPv4 CIDR block (e.g. \"203.0.113.10/32\")."
+    condition     = length(var.airbyte_basic_auth_username) > 0
+    error_message = "airbyte_basic_auth_username is required and must be non-empty; the Airbyte default ('airbyte') is never used."
   }
+}
+
+variable "airbyte_basic_auth_password" {
+  description = "Basic auth password for the Airbyte UI proxy (sensitive). Empty = bootstrap logs a prominent warning and Airbyte keeps its shipped default. Avoid '$', quotes, backslash and ' #' sequences (compose dotenv interpolation rules)."
+  type        = string
+  sensitive   = true
+  default     = ""
 }
 
 variable "key_name" {

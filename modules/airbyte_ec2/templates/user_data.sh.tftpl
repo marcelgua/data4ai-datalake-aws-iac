@@ -79,6 +79,28 @@ AIRBYTE_STAGING_S3_ENDPOINT=$${S3_ENDPOINT}
 EOF
 
 # -----------------------------------------------------------------------------
+# Basic auth hardening (airbyte-ui-access R5)
+# Appended AFTER the pinned Airbyte .env: compose-go dotenv is
+# last-occurrence-wins, so these override the shipped BASIC_AUTH_* defaults
+# that the airbyte-proxy container enforces on :8000.
+# -----------------------------------------------------------------------------
+cat >> .env <<EOF
+
+# --- data4ai basic auth override (rendered by Terraform user_data) ---
+BASIC_AUTH_USERNAME=${basic_auth_username}
+BASIC_AUTH_PASSWORD=${basic_auth_password}
+EOF
+
+%{ if basic_auth_password == "" }
+echo "=== [user-data] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ==="
+echo "=== [user-data] WARNING: airbyte_basic_auth_password is EMPTY — Airbyte's"
+echo "=== [user-data] WARNING: shipped default credentials remain IN EFFECT on"
+echo "=== [user-data] WARNING: :8000. Set TF_VAR_airbyte_basic_auth_password and"
+echo "=== [user-data] WARNING: re-apply to harden the Airbyte UI proxy."
+echo "=== [user-data] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ==="
+%{ endif }
+
+# -----------------------------------------------------------------------------
 # Launch
 # -----------------------------------------------------------------------------
 echo "=== [user-data] Starting Airbyte (docker compose up -d) ==="

@@ -34,9 +34,20 @@ variable "ami_id" {
   default     = ""
 }
 
-variable "allowed_ssh_cidr" {
-  description = "CIDR block allowed to SSH (port 22) into the instance."
+variable "airbyte_basic_auth_username" {
+  description = "REQUIRED. Basic auth username for the Airbyte UI proxy (rendered into the Airbyte .env by user_data)."
   type        = string
+
+  validation {
+    condition     = length(var.airbyte_basic_auth_username) > 0
+    error_message = "airbyte_basic_auth_username is required and must be non-empty; the Airbyte default ('airbyte') is never used."
+  }
+}
+
+variable "airbyte_basic_auth_password" {
+  description = "Basic auth password for the Airbyte UI proxy (sensitive). Empty is accepted: bootstrap logs a prominent warning and Airbyte keeps its shipped default (warn-don't-fail)."
+  type        = string
+  sensitive   = true
 }
 
 variable "key_name" {

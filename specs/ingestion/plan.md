@@ -164,7 +164,9 @@ Prod requires no overrides — standard credential chain (env vars / shared conf
 | Module | Inputs | Outputs |
 |---|---|---|
 | `s3_bucket` | `bucket_name: string`, `environment: string` | `bucket_name`, `bucket_arn` |
-| `airbyte_ec2` | `bucket_name`, `bucket_arn`, `instance_type`, `ami_id`, `allowed_ssh_cidr`, `environment` | `instance_id`, `public_ip` |
+| `airbyte_ec2` | `bucket_name`, `bucket_arn`, `instance_type`, `ami_id`, `environment` | `instance_id` |
+
+_Amended per `specs/airbyte-ui-access/spec.md` (R7 + spec delta): `allowed_ssh_cidr` input and `public_ip` output removed — breaking change to the module interface._
 
 ### `user_data.sh.tftpl` contract
 

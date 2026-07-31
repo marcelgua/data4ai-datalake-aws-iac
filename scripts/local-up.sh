@@ -35,6 +35,13 @@ docker info >/dev/null 2>&1          || fail "docker daemon is not running (or n
 grep -Eq '^\s*environment\s*=\s*"local"' "${TFVARS}" \
   || fail "safety check: ${TFVARS} does not set environment = \"local\""
 
+# Dummy basic-auth credentials for the required airbyte-ui-access variables
+# (inert LocalStack-only values: LocalStack never boots the instance, so the
+# user_data that would consume them never runs; the dummy lives only in
+# gitignored local state).
+export TF_VAR_airbyte_basic_auth_username="${TF_VAR_airbyte_basic_auth_username:-local-dev}"
+export TF_VAR_airbyte_basic_auth_password="${TF_VAR_airbyte_basic_auth_password:-local-dummy-pw-sentinel-keep-local}"
+
 # ---------------------------------------------------------------------------
 # 1. LocalStack
 # ---------------------------------------------------------------------------
