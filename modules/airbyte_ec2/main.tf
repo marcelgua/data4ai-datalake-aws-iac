@@ -51,7 +51,7 @@ data "aws_ami" "amazon_linux_2023" {
 # -----------------------------------------------------------------------------
 resource "aws_security_group" "airbyte" {
   name        = "${var.name_prefix}-sg"
-  description = "Airbyte host: no public inbound — SSM Session Manager only"
+  description = "Airbyte host: no public inbound -- SSM Session Manager only"
 
   egress {
     description = "Allow all outbound (package repos, Docker Hub, S3, sources)"
